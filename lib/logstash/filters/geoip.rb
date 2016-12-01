@@ -1,6 +1,7 @@
 # encoding: utf-8
 require "logstash/filters/base"
 require "logstash/namespace"
+require "ipaddr"
 
 require "logstash-filter-geoip_jars"
 
@@ -123,6 +124,15 @@ class LogStash::Filters::GeoIP < LogStash::Filters::Base
   # Tags the event on failure to look up geo information. This can be used in later analysis.
   config :tag_on_failure, :validate => :array, :default => ["_geoip_lookup_failure"]
 
+  # If the ip field is an array: check which one is not a private ip. The first non private ip will be used.
+  config :filter_private_ips, :validate => :boolean, :required => false, :default => true
+
+  # String by which the ip field should be tokenized
+  config :ip_split_symbol, :validate => :string, :required => false, :default => ","
+
+  # list of ip patterns that private ips start with. 
+  config :private_ip_prefixes, :validate => :array, :required => false, :default => ["10/8", "192.168/16" ,"172.16.0.0/12"]
+
   public
   def register
     suppress_all_warnings do
@@ -135,6 +145,13 @@ class LogStash::Filters::GeoIP < LogStash::Filters::Base
       end
 
       @logger.info("Using geoip database", :path => @database)
+    if @filter_private_ips
+      @logger.info("Filtering private ips with delimiter " + @ip_split_symbol + " for prefixes " + @private_ip_prefixes.to_s)
+    end
+    # For the purpose of initializing this filter, geoip is initialized here but
+    # not set as a global. The geoip module imposes a mutex, so the filter needs
+    # to re-initialize this later in the filter() thread, and save that access
+    # as a thread-local variable.
 
       db_file = JavaIO::File.new(@database)
       begin
@@ -144,15 +161,24 @@ class LogStash::Filters::GeoIP < LogStash::Filters::Base
         raise e
       end
     end
+
+    @private_ips = @private_ip_prefixes.collect do | adress |
+      begin
+        IPAddr.new(adress)
+      rescue ArgumentError => e
+        @logger.warn("Invalid IP network, skipping", :adress => adress)
+        nil
+       end
+    end
+    @private_ips.compact!
+
   end # def register
 
   public
   def filter(event)
     return unless filter?(event)
-
     begin
-      ip = event[@source]
-      ip = ip.first if ip.is_a? Array
+      ip = select_ip(event[@source])
       geo_data_hash = Hash.new
       ip_address = InetAddress.getByName(ip)
       response = @parser.city(ip_address)
@@ -176,7 +202,67 @@ class LogStash::Filters::GeoIP < LogStash::Filters::Base
 
     filter_matched(event)
   end # def filter
-  
+
+  def apply_geodata(geo_data_hash, event)
+    # don't do anything more if the lookup result is nil?
+    return false if geo_data_hash.nil?
+    # only set the event[@target] if the lookup result is not nil: BWC
+    event[@target] = {} if event[@target].nil?
+    # don't do anything more if the lookup result is empty?
+    return false if geo_data_hash.empty?
+    geo_data_hash.each do |key, value|
+      if @no_fields || @fields.include?(key)
+        # can't dup numerics
+        event["[#{@target}][#{key}]"] = value.is_a?(Numeric) ? value : value.dup
+      end
+    end # geo_data_hash.each
+    true
+  end
+
+  def select_ip(ip)
+    if ip.nil?
+      return nil
+    end
+    if ip.is_a? Array
+      if @filter_private_ips 
+        ip = get_public_ip(ip) 
+      else 
+        ip = ip.first
+      end
+    else
+      if @filter_private_ips
+        ip = get_public_ip(ip.split(@ip_split_symbol))
+      # else: return original string
+      end
+    end
+    ip
+  end
+
+  def get_public_ip(ip_array)
+    ip_array.each do | ip |
+      ip = ip.strip
+      if !is_private(ip)
+        return ip
+      end
+    end
+    nil
+  end
+
+  def is_private(ip)
+    begin
+      ipo = IPAddr.new(ip)
+      @private_ips.each do | private_ip |
+        @logger.debug("Checking IP inclusion", :private_ip => private_ip, :network => ipo) # TODO remove
+        if private_ip.include?(ipo)
+          return true
+        end
+      end
+      false
+    rescue => e
+      @logger.error("Couldnt check if ip is private.", :input_data => ip)
+    end
+  end
+
   def populate_geo_data(response, ip_address, geo_data_hash)
     country = response.getCountry()
     subdivision = response.getMostSpecificSubdivision()

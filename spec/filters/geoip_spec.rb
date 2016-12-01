@@ -144,6 +144,7 @@ describe LogStash::Filters::GeoIP do
             geoip {
               source => "ip"
               database => "#{CITYDB}"
+              filter_private_ips => false
             }
           }
         CONFIG
@@ -158,7 +159,7 @@ describe LogStash::Filters::GeoIP do
     end
 
     describe "filter method outcomes" do
-      let(:plugin) { LogStash::Filters::GeoIP.new("source" => "message", "add_tag" => "done", "database" => CITYDB) }
+      let(:plugin) { LogStash::Filters::GeoIP.new("source" => "message", "add_tag" => "done", "database" => CITYDB, "filter_private_ips" => false) }
       let(:event) { LogStash::Event.new("message" => ipstring) }
 
       before do
@@ -224,6 +225,98 @@ describe LogStash::Filters::GeoIP do
     end
 
   end
+
+  describe "multiple ips" do
+    config <<-CONFIG
+          filter {
+            geoip {
+              source => "ip"
+              database => "#{ASNDB}"
+              filter_private_ips => true
+            }
+          }
+        CONFIG
+
+    describe "filter method outcomes" do
+      let(:plugin) { LogStash::Filters::GeoIP.new("source" => "message", "add_tag" => "done", "database" => ASNDB) }
+      let(:event) { LogStash::Event.new("message" => ipstring) }
+
+      before do
+        plugin.register
+        plugin.filter(event)
+      end
+
+      context "when multiple ips are found" do
+        # regression test for issue https://github.com/logstash-plugins/logstash-filter-geoip/issues/51
+        let(:ipstring) { "123.45.67.89,61.160.232.222" }
+
+        it "should take the first public ip" do # {"number"=>"AS6619", "asn"=>"SamsungSDS Inc."}
+          expect(event["geoip"]["number"]).not_to be_nil
+          expect(event["geoip"]["asn"]).not_to be_nil
+        end
+      end
+    end
+
+  end 
+
+  describe "private ips" do
+    let(:plugin) { LogStash::Filters::GeoIP.new("source" => "message", "add_tag" => "done", "database" => ASNDB) }
+    before do
+      plugin.register
+    end
+    
+    context "when ip is in a private 10/8 network" do
+
+      let(:event) { LogStash::Event.new("message" => "10.1.2.3" ) }
+      before do
+        plugin.filter(event)
+      end
+
+      it "should return nil" do
+        expect(event["geoip"]).to be_nil
+        end # it
+      end # context
+
+     context "when ip is in a private 172.16/12 network" do
+
+      let(:event) { LogStash::Event.new("message" => "172.16.0.8" ) }
+      before do
+        plugin.filter(event)
+      end
+
+      it "should return nil" do
+        expect(event["geoip"]).to be_nil
+        end # it
+      end # context
+
+     context "when ip is in a private 192.168/16 network" do
+
+      let(:event) { LogStash::Event.new("message" => "192.168.8.15" ) }
+      before do
+        plugin.filter(event)
+      end
+
+      it "should return nil" do
+        expect(event["geoip"]).to be_nil
+        end # it
+      end # context
+
+     context "when ip is not in a private network" do
+
+      let(:event) { LogStash::Event.new("message" => "172.15.0.8" ) }
+      before do
+        plugin.filter(event)
+      end
+
+      it "should not return nil" do
+        expect(event["geoip"]).not_to be_nil
+        end # it
+      end # context
+      
+    end # describe
+
+
+
 
   describe "an invalid database" do
     config <<-CONFIG
