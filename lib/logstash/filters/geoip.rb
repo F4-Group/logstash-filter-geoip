@@ -131,7 +131,7 @@ class LogStash::Filters::GeoIP < LogStash::Filters::Base
   config :ip_split_symbol, :validate => :string, :required => false, :default => ","
 
   # list of ip patterns that private ips start with. 
-  config :private_ip_prefixes, :validate => :array, :required => false, :default => ["10/8", "192.168/16" ,"172.16.0.0/12"]
+  config :private_ip_prefixes, :validate => :array, :required => false, :default => ["10.0.0.0/8", "192.168.0.0/16" ,"172.16.0.0/12"]
 
   public
   def register
